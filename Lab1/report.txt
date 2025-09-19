@@ -1,0 +1,60 @@
+# Query 1
+
+- Started with the plain query: WHERE project = ?. Medians: p0 ≈ 0.04s, p5 ≈1.02s.
+
+- Optimization: added a composite index on comments(project, term) (idx_comments_project_term) and re-ran 3×.
+Medians: p0 ≈ 0.03s (no significant improvement because there might be rounding errors), p5 = 0.98s (~1.04× faster, also no significant improvement).
+
+- Notes: p5 is huge, so indexing helps more there. The database dump already has a very similar index on (project, term, submitted_at), 
+so my new index was mostly redundant, a small win likely from the narrower key. 
+
+
+# Query 2
+
+- Baseline: single SELECT with both filters (WHERE project = ? AND term = ?).
+Medians: p0 f24 ≈ 0.04s, p1 w25 ≈ 0.32s.
+
+- Optimization: kept the comments(project, term) index and re-timed 3×.
+Medians: p0 f24 ≈ 0.04s, p1 w25 ≈ 0.32s (no meaningful change).
+
+- Notes: These filters already line up with the dump’s built-in (project, term, submitted_at) index, so adding my (project, term) index didn’t move the needle. 
+Times are already well under the target for these queries. If I ever needed faster sorted output, 
+I’d consider a bigger covering index that matches the ORDER BY, but it wasn’t necessary here.
+
+
+# Query 3
+
+- Baseline: Plain GROUP BY project, function_name with ORDER BY project, function_name.
+3 runs: 0.30s, 0.29s, 0.29s. Median: ≈ 0.29s.
+
+- Optimization: Added CREATE INDEX idx_cog_project_func ON cognitive_complexity(project, function_name, complexity);
+3 runs: 0.13s, 0.12s, 0.13s. Median ≈ 0.13s.
+Speedup ≈ 0.29 / 0.13 ≈ 2.2× (well over the 50% requirement).
+
+- Notes: The index order matches the query’s GROUP BY/ORDER BY (project → function), so rows arrive pre-grouped and pre-sorted, avoiding a big filesort.
+Including complexity in the index lets MySQL compute AVG(complexity) with far fewer table reads, which are often index-only.
+Same SQL before and after, only the index changed.
+
+
+# Query 4
+
+
+- Baseline: NOT EXISTS anti-join: list distinct function names from p5 that don’t appear in p3, with an ORDER BY function_name.
+Medians over 3 runs: ≈ 0.06s (0.06, 0.06, 0.07).
+
+- Optimization: I tried adding an index on cognitive_complexity(project, function_name), then re-ran 3×.
+Medians: ≈ 0.06s (0.06, 0.06, 0.07) — basically no change.
+
+- Notes: This query was already fast. The index I added was redundant with what I had from Q3 (the (project, function_name, complexity) index), 
+so the optimizer already had a good plan. Since I’m well under the ~0.19s guidance, I didn’t bother with fancier rewrites (like pre-aggregating or a (function_name, project) index).
+
+
+# Query 5
+
+- Baseline: used a NOT EXISTS anti-join between comments and test_scores on the full submission key (username, term, project, submitted_at). 
+
+- Optimization: none — Q5 must work on a fresh, unmodified database. I kept the query as-is (no ORDER BY, no extra hints) to maximize speed.
+
+- Notes: Matching on all four key columns avoids accidental mismatches and lets MySQL short-circuit the NOT EXISTS check quickly. 
+Since order doesn’t matter here, skipping ORDER BY helps. 
+The median ~0.16s successfully meets the read-only ≤ 1.15s requirement.
